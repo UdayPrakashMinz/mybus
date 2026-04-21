@@ -1,0 +1,196 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ----- Helper functions -----
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(uid()));
+    }
+
+    function roles() {
+      return userDoc().data != null ? userDoc().data.roles : {};
+    }
+
+    function isAdmin() {
+      return isSignedIn() && roles().admin == true;
+    }
+
+    function isBusOwner() {
+      return isSignedIn() && roles().busOwner == true;
+    }
+
+    function isCustomer() {
+      return isSignedIn() && roles().customer == true;
+    }
+
+    // ================= USERS =================
+    match /users/{userId} {
+      // Read:
+      // - user can read own profile
+      // - admin can read any
+      allow get, list:
+        if isSignedIn() &&
+           (userId == uid() || isAdmin());
+
+      // Write:
+      // - user can update limited fields on own profile (not roles)
+      // - admin can update any
+      allow update:
+        if isSignedIn() && (
+          // self-update without touching roles
+          (userId == uid() &&
+           request.resource.data.roles == resource.data.roles)
+          ||
+          // admin can change anything
+          isAdmin()
+        );
+
+      // Create:
+      // - you usually create user docs from backend / signup logic
+      allow create:
+        if isSignedIn() && userId == uid();
+
+      // Delete: admin only
+      allow delete:
+        if isAdmin();
+    }
+
+    // ================= BUSES =================
+    match /buses/{busId} {
+      // Everyone signed in can read buses (for search / booking)
+      allow get, list:
+        if isSignedIn();
+
+      // Create bus:
+      // - bus owners and admins
+      allow create:
+        if isSignedIn() &&
+           (isBusOwner() || isAdmin()) &&
+           request.resource.data.ownerId == uid();
+
+      // Update bus:
+      // - owner of that bus
+      // - admin (any bus)
+      allow update:
+        if isSignedIn() && (
+          (isBusOwner() &&
+           resource.data.ownerId == uid() &&
+           request.resource.data.ownerId == resource.data.ownerId)
+          ||
+          isAdmin()
+        );
+
+      // Delete bus:
+      // - owner or admin
+      allow delete:
+        if isSignedIn() && (
+          (isBusOwner() && resource.data.ownerId == uid())
+          || isAdmin()
+        );
+    }
+
+    // ================= PRICES =================
+    match /prices/{priceId} {
+      // Read:
+      // - signed in users (for search listings)
+      allow get, list:
+        if isSignedIn();
+
+      // Write:
+      // - bus owners and admins only
+      allow create, update, delete:
+        if isSignedIn() && (isBusOwner() || isAdmin());
+    }
+
+    // ================= TRIPS =================
+    match /trips/{tripId} {
+      // Everyone signed in can see trips
+      allow get, list:
+        if isSignedIn();
+
+      // Create trip:
+      // - bus owner or admin
+      // - must own the bus if not admin
+      allow create:
+        if isSignedIn() && (
+          isAdmin() ||
+          (
+            isBusOwner() &&
+            request.resource.data.ownerId == uid()
+          )
+        );
+
+      // Update trip:
+      // - owner of the trip
+      // - admin
+      allow update:
+        if isSignedIn() && (
+          isAdmin() ||
+          (
+            isBusOwner() &&
+            resource.data.ownerId == uid()
+          )
+        );
+
+      // Delete trip:
+      // - owner or admin
+      allow delete:
+        if isSignedIn() && (
+          isAdmin() ||
+          (
+            isBusOwner() &&
+            resource.data.ownerId == uid()
+          )
+        );
+    }
+
+    // ================= SEAT AVAILABILITY =================
+    // Real-time seat availability per trip + date + segment.
+    match /seat_availability/{seatId} {
+      allow get, list:
+        if isSignedIn();
+
+      // Allow signed-in users to update availability via transactions.
+      allow create, update:
+        if isSignedIn();
+
+      allow delete:
+        if isAdmin();
+    }
+
+    // ================= BOOKINGS =================
+    match /bookings/{bookingId} {
+      // Read:
+      // - user can read own bookings
+      // - admin can read all
+      allow get, list:
+        if isSignedIn() && (
+          resource.data.userId == uid() || isAdmin()
+        );
+
+      // Create:
+      // - signed-in customers (and optionally busOwner/admin when acting as customer)
+      allow create:
+        if isSignedIn() && (
+          isCustomer() || isBusOwner() || isAdmin()
+        ) &&
+        request.resource.data.userId == uid();
+
+      // Update / delete:
+      // - user can modify own bookings (e.g. cancel)
+      // - admin can modify any
+      allow update, delete:
+        if isSignedIn() && (
+          resource.data.userId == uid() || isAdmin()
+        );
+    }
+  }
+}
