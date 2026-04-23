@@ -188,16 +188,3 @@ mybus/
 
 ---
 
-## ⚠️ Notes
-
-* Do NOT upload Firebase config files (`google-services.json`, `GoogleService-Info.plist`) publicly
-* Secure Firestore rules before production
-* Keep API keys and secrets private
-
----
-
-## 🚀 Conclusion
-
-MyBus demonstrates how modern tools like Flutter and Firebase can be used to build a complete real-world application efficiently. It highlights how easy it is to develop, manage, and scale a mobile application with the right tools.
-
-**It is easy to make an app — you just need to start it.**
