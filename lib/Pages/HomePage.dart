@@ -28,7 +28,8 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
   void initState() {
     super.initState();
     _restoreCachedLocation();
-    _loadLocation();
+    _loadLocation(); // GPS
+    _loadGeoLocations(); // from locations collection
   }
 
   Future<void> _restoreCachedLocation() async {
@@ -67,11 +68,16 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.medium,
       );
+
       if (!mounted) return;
+
       setState(() {
         _currentPosition = position;
         _locationStatus = 'Using live location';
       });
+
+      // ✅ TRY AUTO PICK HERE
+      _maybeAutoPickLocation();
     } catch (_) {
       if (!mounted) return;
       setState(() => _locationStatus = 'Location unavailable');
@@ -83,78 +89,60 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
     return double.tryParse(value?.toString() ?? '');
   }
 
-  List<_LocationOption> _extractLocations(List<QueryDocumentSnapshot> docs) {
-    final Map<String, _LocationOption> byName = {};
+  List<String> _extractLocationNames(List<QueryDocumentSnapshot> docs) {
+    final Set<String> names = {};
 
     for (final doc in docs) {
       final trip = doc.data() as Map<String, dynamic>;
       final segments = (trip['segments'] as List<dynamic>?) ?? [];
+
       for (final rawSeg in segments) {
         final seg = rawSeg as Map<String, dynamic>;
+
         final from = (seg['from'] ?? '').toString().trim();
         final to = (seg['to'] ?? '').toString().trim();
-        final fromLat = _readNum(seg['fromLat'] ?? seg['fromLatitude']);
-        final fromLng = _readNum(seg['fromLng'] ?? seg['fromLongitude']);
-        final toLat = _readNum(seg['toLat'] ?? seg['toLatitude']);
-        final toLng = _readNum(seg['toLng'] ?? seg['toLongitude']);
 
-        if (from.isNotEmpty) {
-          byName.putIfAbsent(
-            from,
-            () => _LocationOption(name: from, lat: fromLat, lng: fromLng),
-          );
-        }
-        if (to.isNotEmpty) {
-          byName.putIfAbsent(
-            to,
-            () => _LocationOption(name: to, lat: toLat, lng: toLng),
-          );
-        }
+        if (from.isNotEmpty) names.add(from);
+        if (to.isNotEmpty) names.add(to);
       }
     }
 
-    final locations = byName.values.toList()
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return locations;
+    final list = names.toList()..sort();
+    return list;
   }
 
-  void _maybeAutoPickLocation(List<_LocationOption> options) {
+  void _maybeAutoPickLocation() {
     if (_userPickedLocation) return;
-    if (options.isEmpty) return;
 
-    String? nextSelection;
+    //  MUST have both GPS + geo DB
+    if (_geoLocations.isEmpty || _currentPosition == null) return;
 
-    if (_currentPosition != null) {
-      final double lat = _currentPosition!.latitude;
-      final double lng = _currentPosition!.longitude;
-      double bestDistance = double.infinity;
+    final lat = _currentPosition!.latitude;
+    final lng = _currentPosition!.longitude;
 
-      for (final option in options) {
-        if (option.lat == null || option.lng == null) continue;
-        final distance = Geolocator.distanceBetween(
-          lat,
-          lng,
-          option.lat!,
-          option.lng!,
-        );
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          nextSelection = option.name;
-        }
+    double bestDistance = double.infinity;
+    String? bestMatch;
+
+    for (final loc in _geoLocations) {
+      if (loc.lat == null || loc.lng == null) continue;
+
+      final distance = Geolocator.distanceBetween(lat, lng, loc.lat!, loc.lng!);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestMatch = loc.name;
       }
     }
 
-    nextSelection ??= options.first.name;
-
-    if (nextSelection != _selectedLocation) {
+    if (bestMatch != null && bestMatch != _selectedLocation) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+
         setState(() {
-          _selectedLocation = nextSelection;
+          _selectedLocation = bestMatch;
         });
-        unawaited(
-          LocationCache.save(location: nextSelection, isUserPicked: false),
-        );
+
+        LocationCache.save(location: bestMatch, isUserPicked: false);
       });
     }
   }
@@ -203,6 +191,44 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
     });
   }
 
+  List<_LocationOption> _geoLocations = [];
+
+  Future<void> _loadGeoLocations() async {
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('locations')
+          .doc('Odisha')
+          .get();
+
+      if (!doc.exists) return;
+
+      final data = doc.data() as Map<String, dynamic>;
+
+      final List<_LocationOption> loaded = [];
+
+      data.forEach((key, value) {
+        if (value is Map<String, dynamic>) {
+          loaded.add(
+            _LocationOption(
+              name: key,
+              lat: (value['lat'] as num?)?.toDouble(),
+              lng: (value['lng'] as num?)?.toDouble(),
+            ),
+          );
+        }
+      });
+
+      if (!mounted) return;
+
+      setState(() => _geoLocations = loaded);
+
+      // ✅ TRY AUTO PICK HERE
+      _maybeAutoPickLocation();
+    } catch (e) {
+      print("Geo load error: $e");
+    }
+  }
+
   bool _matchesDestination(Map<String, dynamic> provider) {
     final q = _query.trim().toLowerCase();
     if (q.isEmpty) return true;
@@ -232,7 +258,7 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
                       controller: _searchController,
                       onChanged: (value) => setState(() => _query = value),
                       decoration: InputDecoration(
-                        hintText: 'Search provider by destination',
+                        hintText: 'Search provider by destination.',
                         prefixIcon: const Icon(Icons.search),
                         suffixIcon: _query.isEmpty
                             ? null
@@ -277,8 +303,8 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
                   }
 
                   final docs = snapshot.data?.docs ?? [];
-                  final locations = _extractLocations(docs);
-                  _maybeAutoPickLocation(locations);
+                  final locations = _extractLocationNames(docs);
+                  _maybeAutoPickLocation();
 
                   final providers = _buildProviderCards(docs);
                   final visibleProviders = providers
@@ -319,79 +345,47 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
           .snapshots(),
       builder: (context, snapshot) {
         final docs = snapshot.data?.docs ?? [];
-        final locations = _extractLocations(docs);
-        if (_selectedLocation != null &&
-            locations.every((l) => l.name != _selectedLocation)) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            setState(() {
-              _selectedLocation = null;
-              _userPickedLocation = false;
-            });
-            unawaited(
-              LocationCache.save(location: null, isUserPicked: false),
-            );
-          });
+
+        final locations = _extractLocationNames(docs);
+
+        // 🔥 ensure selected location exists in dropdown
+        final Set<String> locationSet = {...locations};
+
+        if (_selectedLocation != null && _selectedLocation!.isNotEmpty) {
+          locationSet.add(_selectedLocation!);
         }
-        _maybeAutoPickLocation(locations);
+
+        final finalLocations = locationSet.toList()..sort();
 
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-
           child: Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
               const Icon(Icons.my_location, size: 16, color: Color(0xFF137FEC)),
               const SizedBox(width: 8),
-              Flexible(
+
+              Expanded(
                 child: Text(
                   _locationStatus,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF333333),
-                  ),
+                  style: const TextStyle(fontSize: 12),
                 ),
               ),
-              const SizedBox(width: 10),
+
               DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: _selectedLocation,
-                  isDense: true,
-                  icon: const Icon(
-                    Icons.keyboard_arrow_down,
-                    size: 16,
-                    color: Color(0xFF333333),
-                  ),
-                  hint: const Text(
-                    'Select location',
-                    style: TextStyle(
-                      color: Color(0xFF137FEC),
-                      decoration: TextDecoration.underline,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-
-                  items: locations
-                      .map(
-                        (loc) => DropdownMenuItem<String>(
-                          value: loc.name,
-                          child: Text(
-                            loc.name,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      )
-                      .toList(),
+                  hint: Text(_selectedLocation ?? "Select location"),
+                  items: finalLocations.map((loc) {
+                    return DropdownMenuItem(value: loc, child: Text(loc));
+                  }).toList(),
                   onChanged: (value) {
                     setState(() {
                       _selectedLocation = value;
                       _userPickedLocation = true;
                     });
-                    unawaited(
-                      LocationCache.save(location: value, isUserPicked: true),
-                    );
+
+                    LocationCache.save(location: value, isUserPicked: true);
                   },
                 ),
               ),
@@ -417,9 +411,6 @@ class _ConsumerHomePageState extends State<ConsumerHomePage> {
         final avatar = data['avatar'];
         final email = FirebaseAuth.instance.currentUser?.email ?? "";
         final name = (data['name'] as String?)?.trim();
-        final roles = data['roles'] ?? {};
-        final bool isAdmin = roles['admin'] == true;
-        final bool isBusOwner = roles['busOwner'] == true;
 
         final displayName = (name != null && name.isNotEmpty) ? name : email;
         final roleLabel = "Consumer";
