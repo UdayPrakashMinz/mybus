@@ -7,7 +7,7 @@ import 'package:mybus/utils/time_utils.dart';
 
 enum BookingAction { bookOnly, razorpayCheckout }
 
-class BusDetailsPage extends StatelessWidget {
+class BusDetailsPage extends StatefulWidget {
   final Map<String, dynamic> bus;
   final String? tripId;
   final DateTime? travelDate;
@@ -27,6 +27,196 @@ class BusDetailsPage extends StatelessWidget {
 
   static const String _razorpayPaymentMethod = 'razorpay';
   static const String _notificationType = 'booking_update';
+
+  @override
+  State<BusDetailsPage> createState() => _BusDetailsPageState();
+}
+
+class _BusDetailsPageState extends State<BusDetailsPage> {
+  static const Color _primary = BusDetailsPage._primary;
+  static const Color _bgLight = BusDetailsPage._bgLight;
+  static const Color _razorpayBlue = BusDetailsPage._razorpayBlue;
+  static const String _razorpayPaymentMethod =
+      BusDetailsPage._razorpayPaymentMethod;
+  static const String _notificationType = BusDetailsPage._notificationType;
+
+  late final List<Map<String, dynamic>> _allSegments;
+  late final List<String> _routePoints;
+  late int _selectedFromIndex;
+  late int _selectedToIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _allSegments = _normalizeSegments(
+      widget.bus['allSegments'] ?? widget.segment?['allSegments'],
+    );
+    final effectiveSegment = widget.segment ?? widget.bus;
+    final defaultFrom = effectiveSegment['from']?.toString() ?? 'From';
+    final defaultTo = effectiveSegment['to']?.toString() ?? 'To';
+
+    _routePoints = _deriveRoutePoints(
+      allSegments: _allSegments,
+      fallbackRoutePoints: (widget.bus['routePoints'] as List?)
+          ?.map((e) => e.toString())
+          .toList(),
+      defaultFrom: defaultFrom,
+      defaultTo: defaultTo,
+    );
+    final initialSelection = _initialSelectionIndices(
+      routePoints: _routePoints,
+      initialFrom: defaultFrom,
+      initialTo: defaultTo,
+    );
+    _selectedFromIndex = initialSelection[0];
+    _selectedToIndex = initialSelection[1];
+  }
+
+  List<Map<String, dynamic>> _normalizeSegments(dynamic raw) {
+    if (raw is! List) return const [];
+    final normalized = <Map<String, dynamic>>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final from = (item['from'] ?? '').toString().trim();
+      final to = (item['to'] ?? '').toString().trim();
+      if (from.isEmpty || to.isEmpty) continue;
+      final depart = (item['depart'] ?? item['departureTime'] ?? '').toString();
+      final arrive = (item['arrive'] ?? item['arrivalTime'] ?? '').toString();
+      final fare = (item['fare'] as num?)?.toDouble() ?? 0;
+      final distance =
+          (item['distanceKm'] as num?)?.toDouble() ??
+          (item['distance'] as num?)?.toDouble() ??
+          (item['distance_km'] as num?)?.toDouble() ??
+          0;
+      normalized.add({
+        ...item.cast<String, dynamic>(),
+        'from': from,
+        'to': to,
+        'depart': depart,
+        'arrive': arrive,
+        'fare': fare,
+        'distanceKm': distance,
+      });
+    }
+    return normalized;
+  }
+
+  List<String> _deriveRoutePoints({
+    required List<Map<String, dynamic>> allSegments,
+    required List<String>? fallbackRoutePoints,
+    required String defaultFrom,
+    required String defaultTo,
+  }) {
+    if (allSegments.isNotEmpty) {
+      final points = <String>[allSegments.first['from'].toString()];
+      for (final seg in allSegments) {
+        points.add(seg['to'].toString());
+      }
+      return points;
+    }
+    if (fallbackRoutePoints != null && fallbackRoutePoints.length > 1) {
+      return fallbackRoutePoints;
+    }
+    return [defaultFrom, defaultTo];
+  }
+
+  List<int> _initialSelectionIndices({
+    required List<String> routePoints,
+    required String initialFrom,
+    required String initialTo,
+  }) {
+    if (routePoints.length < 2) return [0, 1];
+    final fromIndex = routePoints.indexWhere(
+      (p) => p.toLowerCase() == initialFrom.toLowerCase(),
+    );
+    final toIndex = routePoints.indexWhere(
+      (p) => p.toLowerCase() == initialTo.toLowerCase(),
+    );
+    final safeFrom = fromIndex >= 0 ? fromIndex : 0;
+    var safeTo = toIndex >= 0 ? toIndex : routePoints.length - 1;
+    if (safeTo <= safeFrom) safeTo = safeFrom + 1;
+    if (safeTo >= routePoints.length) safeTo = routePoints.length - 1;
+    return [safeFrom, safeTo];
+  }
+
+  List<Map<String, dynamic>> get _selectedSegments {
+    if (_allSegments.isEmpty) return const [];
+    final start = _selectedFromIndex.clamp(0, _allSegments.length - 1).toInt();
+    final endExclusive = _selectedToIndex
+        .clamp(start + 1, _allSegments.length)
+        .toInt();
+    return _allSegments.sublist(start, endExclusive);
+  }
+
+  String get _selectedFrom => _routePoints[_selectedFromIndex];
+
+  String get _selectedTo => _routePoints[_selectedToIndex];
+
+  String get _selectedDepart {
+    final selected = _selectedSegments;
+    if (selected.isEmpty) {
+      return formatTime12h(
+        (widget.segment ?? widget.bus)['depart']?.toString(),
+      );
+    }
+    return formatTime12h(selected.first['depart']?.toString());
+  }
+
+  String get _selectedArrive {
+    final selected = _selectedSegments;
+    if (selected.isEmpty) {
+      return formatTime12h(
+        (widget.segment ?? widget.bus)['arrive']?.toString(),
+      );
+    }
+    return formatTime12h(selected.last['arrive']?.toString());
+  }
+
+  double get _selectedFareValue {
+    final selected = _selectedSegments;
+    if (selected.isNotEmpty) {
+      return selected.fold<double>(0, (sum, seg) {
+        return sum + ((seg['fare'] as num?)?.toDouble() ?? 0);
+      });
+    }
+    return _resolveFareValue(
+      segmentFare: widget.segment?['fare'],
+      busFare: widget.bus['fare'],
+      priceText: widget.bus['price']?.toString() ?? 'Rs 0',
+    );
+  }
+
+  double get _selectedDistanceKm {
+    final selected = _selectedSegments;
+    if (selected.isNotEmpty) {
+      return selected.fold<double>(0, (sum, seg) {
+        final value =
+            (seg['distanceKm'] as num?)?.toDouble() ??
+            (seg['distance'] as num?)?.toDouble() ??
+            (seg['distance_km'] as num?)?.toDouble() ??
+            0;
+        return sum + value;
+      });
+    }
+    return _resolveDistanceKm(widget.segment ?? widget.bus) ?? 0;
+  }
+
+  List<String> get _timelineTimes {
+    if (_routePoints.isEmpty) return const [];
+    final selected = _allSegments;
+    return List<String>.generate(_routePoints.length, (index) {
+      if (index == 0) {
+        return selected.isNotEmpty
+            ? formatTime12h(selected.first['depart']?.toString())
+            : _selectedDepart;
+      }
+      if (selected.isNotEmpty && index - 1 < selected.length) {
+        return formatTime12h(selected[index - 1]['arrive']?.toString());
+      }
+      if (index == _routePoints.length - 1) return _selectedArrive;
+      return '--';
+    });
+  }
 
   String _safeKey(String value) {
     final key = value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
@@ -57,8 +247,8 @@ class BusDetailsPage extends StatelessWidget {
     required String depart,
   }) {
     final id = _seatDocId(
-      tripId: tripId,
-      travelDate: travelDate,
+      tripId: widget.tripId,
+      travelDate: widget.travelDate,
       from: from,
       to: to,
       depart: depart,
@@ -69,36 +259,19 @@ class BusDetailsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final effectiveSegment = segment ?? bus;
-    final String company = bus["company"]?.toString() ?? "Bus";
-    final String from = effectiveSegment["from"]?.toString() ?? "From";
-    final String to = effectiveSegment["to"]?.toString() ?? "To";
-    final String depart = formatTime12h(effectiveSegment["depart"]?.toString());
-    final String arrive = formatTime12h(effectiveSegment["arrive"]?.toString());
-    final String duration =
-        bus["duration"]?.toString() ?? _formatDuration(depart, arrive);
-    final String distanceText = _formatDistance(
-      _resolveDistanceKm(effectiveSegment),
-    );
-    final String price =
-        bus["price"]?.toString() ??
-        (effectiveSegment["fare"] != null
-            ? 'Rs ${effectiveSegment["fare"]}'
-            : "Rs0");
-    final double fareValue = _resolveFareValue(
-      segmentFare: effectiveSegment["fare"],
-      busFare: bus["fare"],
-      priceText: price,
-    );
-    final int seats = bus["seats"] is num
-        ? (bus["seats"] as num).toInt()
-        : int.tryParse(bus["seats"]?.toString() ?? '') ?? 0;
-
-    final List<String> routePoints =
-        (bus["routePoints"] as List?)?.map((e) => e.toString()).toList() ??
-        [from, to];
-
-    final int currentIndex = routePoints.length > 1 ? 1 : 0;
+    final String company = widget.bus["company"]?.toString() ?? "Bus";
+    final String from = _selectedFrom;
+    final String to = _selectedTo;
+    final String depart = _selectedDepart;
+    final String arrive = _selectedArrive;
+    final String distanceText = _formatDistance(_selectedDistanceKm);
+    final String price = _selectedFareValue > 0
+        ? 'Rs ${_selectedFareValue.toStringAsFixed(0)}'
+        : 'Rs --';
+    final double fareValue = _selectedFareValue;
+    final int seats = widget.bus["seats"] is num
+        ? (widget.bus["seats"] as num).toInt()
+        : int.tryParse(widget.bus["seats"]?.toString() ?? '') ?? 0;
 
     return Scaffold(
       backgroundColor: _bgLight,
@@ -129,11 +302,12 @@ class BusDetailsPage extends StatelessWidget {
             totalDistance: distanceText,
           ),
           const SizedBox(height: 16),
+
           _scheduleCard(
-            points: routePoints,
-            depart: depart,
-            arrive: arrive,
-            currentIndex: currentIndex,
+            points: _routePoints,
+            times: _timelineTimes,
+            selectedFromIndex: _selectedFromIndex,
+            selectedToIndex: _selectedToIndex,
           ),
         ],
       ),
@@ -172,7 +346,7 @@ class BusDetailsPage extends StatelessWidget {
   }
 
   String _formatDuration(String depart, String arrive) {
-    final baseDay = travelDate ?? DateTime.now();
+    final baseDay = widget.travelDate ?? DateTime.now();
     final depDt = _parseTimeOnDay(baseDay, depart);
     var arrDt = _parseTimeOnDay(baseDay, arrive);
     if (depDt == null || arrDt == null) return '--';
@@ -193,9 +367,9 @@ class BusDetailsPage extends StatelessWidget {
         (effectiveSegment['distanceKm'] as num?) ??
         (effectiveSegment['distance'] as num?) ??
         (effectiveSegment['distance_km'] as num?) ??
-        (bus['distanceKm'] as num?) ??
-        (bus['distance'] as num?) ??
-        (bus['distance_km'] as num?);
+        (widget.bus['distanceKm'] as num?) ??
+        (widget.bus['distance'] as num?) ??
+        (widget.bus['distance_km'] as num?);
     return value?.toDouble();
   }
 
@@ -264,25 +438,6 @@ class BusDetailsPage extends StatelessWidget {
                       ),
                     ),
                   ],
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: _primary,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: const Text(
-                    'Live Tracking',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.6,
-                    ),
-                  ),
                 ),
               ],
             ),
@@ -390,16 +545,10 @@ class BusDetailsPage extends StatelessWidget {
 
   Widget _scheduleCard({
     required List<String> points,
-    required String depart,
-    required String arrive,
-    required int currentIndex,
+    required List<String> times,
+    required int selectedFromIndex,
+    required int selectedToIndex,
   }) {
-    final List<String> times = List<String>.generate(points.length, (index) {
-      if (index == 0) return depart;
-      if (index == points.length - 1) return arrive;
-      return '--';
-    });
-
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -435,15 +584,20 @@ class BusDetailsPage extends StatelessWidget {
           const SizedBox(height: 16),
           Column(
             children: List.generate(points.length, (index) {
-              final bool isCurrent = index == currentIndex;
-              final bool isDone = index < currentIndex;
+              final bool isCurrent = index == selectedFromIndex;
+              final bool isInSelectedRange =
+                  index >= selectedFromIndex && index <= selectedToIndex;
+              final bool isDone = index < selectedFromIndex;
               final bool isLast = index == points.length - 1;
               return _timelineItem(
+                index: index,
                 title: points[index],
                 time: times[index],
                 isCurrent: isCurrent,
                 isDone: isDone,
                 isLast: isLast,
+                isInSelectedRange: isInSelectedRange,
+                isSelectedDestination: index == selectedToIndex,
               );
             }),
           ),
@@ -453,117 +607,153 @@ class BusDetailsPage extends StatelessWidget {
   }
 
   Widget _timelineItem({
+    required int index,
     required String title,
     required String time,
     required bool isCurrent,
     required bool isDone,
     required bool isLast,
+    required bool isInSelectedRange,
+    required bool isSelectedDestination,
   }) {
-    final Color lineColor = isCurrent ? _primary : const Color(0xFFE5E7EB);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Column(
-            children: [
-              Container(
-                width: 22,
-                height: 22,
-                decoration: BoxDecoration(
-                  color: isCurrent
-                      ? _primary.withOpacity(0.15)
-                      : isDone
-                      ? const Color(0xFFE5E7EB)
-                      : Colors.white,
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(
+    final Color lineColor = isInSelectedRange
+        ? _primary
+        : const Color(0xFFE5E7EB);
+    return GestureDetector(
+      onTap: () {
+        if (index > _selectedFromIndex) {
+          setState(() {
+            _selectedToIndex = index;
+          });
+        }
+      },
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Column(
+              children: [
+                Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
                     color: isCurrent
-                        ? _primary
+                        ? _primary.withOpacity(0.15)
+                        : isSelectedDestination
+                        ? const Color(0xFFE8F2FF)
                         : isDone
                         ? const Color(0xFFE5E7EB)
-                        : const Color(0xFFD1D5DB),
-                    width: 2,
+                        : Colors.white,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: isCurrent
+                          ? _primary
+                          : isSelectedDestination
+                          ? _primary
+                          : isDone
+                          ? const Color(0xFFE5E7EB)
+                          : const Color(0xFFD1D5DB),
+                      width: 2,
+                    ),
                   ),
-                ),
-                child: isCurrent
-                    ? Center(
-                        child: Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: _primary,
-                            borderRadius: BorderRadius.circular(999),
+                  child: isCurrent
+                      ? Center(
+                          child: Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: _primary,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
                           ),
-                        ),
-                      )
-                    : isDone
-                    ? const Icon(
-                        Icons.check,
-                        size: 14,
-                        color: Color(0xFF6B7280),
-                      )
-                    : isLast
-                    ? const Icon(
-                        Icons.location_on,
-                        size: 14,
-                        color: Color(0xFF9CA3AF),
-                      )
-                    : null,
-              ),
-              if (!isLast) Container(width: 2, height: 38, color: lineColor),
-            ],
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontWeight: isCurrent
-                            ? FontWeight.w700
-                            : FontWeight.w600,
-                        color: isCurrent
-                            ? const Color(0xFF111827)
-                            : const Color(0xFF374151),
-                      ),
-                    ),
-                    Text(
-                      time,
-                      style: TextStyle(
-                        color: isCurrent ? _primary : const Color(0xFF6B7280),
-                        fontSize: 12,
-                        fontWeight: isCurrent
-                            ? FontWeight.w700
-                            : FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  isCurrent
-                      ? 'Currently arriving'
+                        )
                       : isDone
-                      ? 'Departed'
+                      ? const Icon(
+                          Icons.check,
+                          size: 14,
+                          color: Color(0xFF6B7280),
+                        )
+                      : isSelectedDestination
+                      ? const Icon(
+                          Icons.flag,
+                          size: 14,
+                          color: Color(0xFF137FEC),
+                        )
                       : isLast
-                      ? 'Destination'
-                      : 'Next stop',
-                  style: TextStyle(
-                    color: isCurrent ? _primary : const Color(0xFF9CA3AF),
-                    fontSize: 11,
-                    fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w500,
-                  ),
+                      ? const Icon(
+                          Icons.location_on,
+                          size: 14,
+                          color: Color(0xFF9CA3AF),
+                        )
+                      : null,
                 ),
+                if (!isLast) Container(width: 2, height: 38, color: lineColor),
               ],
             ),
-          ),
-        ],
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontWeight: isCurrent
+                              ? FontWeight.w700
+                              : FontWeight.w600,
+                          color: isCurrent
+                              ? const Color(0xFF111827)
+                              : isInSelectedRange
+                              ? const Color(0xFF1F2937)
+                              : const Color(0xFF374151),
+                        ),
+                      ),
+                      Text(
+                        time,
+                        style: TextStyle(
+                          color: isInSelectedRange
+                              ? _primary
+                              : const Color(0xFF6B7280),
+                          fontSize: 12,
+                          fontWeight: isCurrent || isSelectedDestination
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    isCurrent
+                        ? 'Selected boarding'
+                        : isSelectedDestination
+                        ? 'Selected dropping'
+                        : isDone
+                        ? 'Departed'
+                        : isLast
+                        ? 'Destination'
+                        : index > _selectedFromIndex
+                        ? 'Tap to select dropping'
+                        : 'Next stop',
+                    style: TextStyle(
+                      color: isCurrent || isSelectedDestination
+                          ? _primary
+                          : const Color(0xFF9CA3AF),
+                      fontSize: 11,
+                      fontWeight: isCurrent || isSelectedDestination
+                          ? FontWeight.w600
+                          : FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -627,15 +817,15 @@ class BusDetailsPage extends StatelessWidget {
       return false;
     }
 
-    if (tripId == null || tripId!.isEmpty) {
+    if (widget.tripId == null || widget.tripId!.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Trip info unavailable for booking')),
       );
       return false;
     }
 
-    final fareValue = segment?['fare'] ?? bus['fare'];
-    final travelDay = travelDate;
+    final fareValue = _selectedFareValue;
+    final travelDay = widget.travelDate;
     String? createdBookingId;
 
     try {
@@ -645,8 +835,8 @@ class BusDetailsPage extends StatelessWidget {
       if (seatRef == null || travelDay == null) {
         final booking = {
           'userId': user.uid,
-          'tripId': tripId,
-          'busName': bus['company'],
+          'tripId': widget.tripId,
+          'busName': widget.bus['company'],
           'from': from,
           'to': to,
           'departureTime': depart,
@@ -659,9 +849,9 @@ class BusDetailsPage extends StatelessWidget {
           'status': 'pending',
           'paymentMethod': paymentMethod,
           'paymentStatus': paymentStatus,
-          'paymentId': ?paymentId,
-          'paymentOrderId': ?paymentOrderId,
-          'paymentSignature': ?paymentSignature,
+          'paymentId': paymentId,
+          'paymentOrderId': paymentOrderId,
+          'paymentSignature': paymentSignature,
           'createdAt': FieldValue.serverTimestamp(),
         };
         final doc = await bookingsRef.add(booking);
@@ -684,7 +874,7 @@ class BusDetailsPage extends StatelessWidget {
           final newAvailable = available - seatsBooked;
 
           final seatPayload = <String, dynamic>{
-            'tripId': tripId,
+            'tripId': widget.tripId,
             'serviceDate': Timestamp.fromDate(travelDay),
             'from': from,
             'to': to,
@@ -702,8 +892,8 @@ class BusDetailsPage extends StatelessWidget {
           createdBookingId = bookingRef.id;
           transaction.set(bookingRef, {
             'userId': user.uid,
-            'tripId': tripId,
-            'busName': bus['company'],
+            'tripId': widget.tripId,
+            'busName': widget.bus['company'],
             'from': from,
             'to': to,
             'departureTime': depart,
@@ -714,9 +904,9 @@ class BusDetailsPage extends StatelessWidget {
             'status': 'pending',
             'paymentMethod': paymentMethod,
             'paymentStatus': paymentStatus,
-            'paymentId': ?paymentId,
-            'paymentOrderId': ?paymentOrderId,
-            'paymentSignature': ?paymentSignature,
+            'paymentId': paymentId,
+            'paymentOrderId': paymentOrderId,
+            'paymentSignature': paymentSignature,
             'createdAt': FieldValue.serverTimestamp(),
           });
         });
